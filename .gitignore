@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# IDEs
+.idea/
+.vscode/
+
+# Environments
+venv/
+ENV/
+env/
+
+# Build and PyPI artifacts (внутри src)
+src/build/
+src/dist/
+src/*.egg-info/

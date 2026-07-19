@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aioptcp"
+version = "1.0.0"
+description = "Persistent TCP (PTCP) session-layer protocol implementation over asyncio"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache Software License 2.0" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Networking",
+]
+# Указываем автора через имя и веб-ресурс без email
+authors = [
+    { name = "Doctorgth" }
+]
+dependencies = [] # Зависимостей времени выполнения нет
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.18",
+]
+
+[project.urls]
+Homepage = "https://github.com/Doctorgth/PTCP"
+Repository = "https://github.com/Doctorgth/PTCP"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aioptcp"]
