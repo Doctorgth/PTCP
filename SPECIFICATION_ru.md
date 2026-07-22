@@ -89,9 +89,11 @@
 | `0x02` | `HANDSHAKE_ACK` | Сервер $\rightarrow$ Клиент | ID сессии (16 байт) + Публичный ключ DH сервера (256 байт) |
 | `0x03` | `DATA` | Двунаправленный | Sequence ID (8 байт, uint64) + Прикладные данные |
 | `0x04` | `ACK` | Двунаправленный | Подтвержденный Sequence ID (8 байт, uint64) |
-| `0x05` | `RESUME` | Клиент $\rightarrow$ Сервер | ID сессии (16 байт) + Nonce (8 байт) + Signature (32 байт) + Recv Sequence ID клиента (8 байт, uint64) |
+| `0x05` | `RESUME_INIT` | Клиент $\rightarrow$ Сервер | ID сессии (16 байт) + Client Nonce (8 байт) + Init Signature (32 байта) |
 | `0x06` | `RESUME_ACK` | Сервер $\rightarrow$ Клиент | Recv Sequence ID сервера (8 байт, uint64) |
-| `0x07` | `CLOSE` | Двунаправленный | Отсутствует (0 байт) |
+| `0x07` | `CLOSE` | Двунаправленный | Nonce (8 байт) + ID сессии (16 байт) + Signature (32 байта) |
+| `0x08` | `RESUME_CHALLENGE` | Сервер $\rightarrow$ Клиент | Server Nonce (8 байт) + Challenge Signature (32 байта) |
+| `0x09` | `RESUME_RESPONSE` | Клиент $\rightarrow$ Сервер | Response Signature (32 байта) + Recv Sequence ID клиента (8 байт, uint64) |
 
 ---
 

@@ -1,4 +1,202 @@
 
+
+**Disclaimer:** This document is an English translation of the original Russian README. While care was taken to maintain consistency, it may contain minor translation inaccuracies or slight terminology differences from the original Russian text. The Russian version remains the primary reference.
+
+---
+
+# aioptcp — Python Implementation of the APTCP Protocol
+
+The `aioptcp` library is an asynchronous implementation of the **APTCP** session-layer protocol (running on top of standard transport TCP) designed for the `asyncio` environment.
+
+The **APTCP** protocol is designed to ensure logical connection persistence during short-term network disruptions, interface handovers (Wi-Fi to LTE), or IP address changes.
+
+> **Terminology Note:**
+> * The network protocol itself is called **APTCP**.
+> * The Python implementation library is called `aioptcp` (the `aio` prefix indicates `asyncio` usage).
+> * Within the library code, classes use the `PTCP` prefix (e.g., `PTCPSocket`, `PTCPClient`, `PTCPServer`), since the asynchronous nature is already indicated by the package name.
+
+---
+
+## Architecture and Features
+
+* **Transparency for Application Code:** When a physical TCP connection drops, the logical socket transitions into a waiting state. Outgoing data is buffered, and calls to `send()` and `recv()` block without raising errors. Once the connection is re-established, the APTCP session automatically resumes without any data loss.
+* **Built-in Flow Control (Backpressure):** Retransmission buffer limits prevent uncontrolled RAM consumption. The `send()` method automatically pauses the calling coroutine if the buffer limit is exceeded.
+* **Secure Session Resumption:** Session resumption is secured via a mutual 3-way Challenge-Response handshake using HMAC-SHA256 signatures derived from a shared secret generated during the initial Diffie-Hellman exchange (2048-bit MODP Group). This protects the protocol against replay and MitM hijacking attacks.
+* **Authenticated Graceful Shutdown:** The `CLOSE` frame is crytographically signed with a session-bound HMAC-SHA256 signature, preventing MitM attackers from injecting unauthorized connection teardown commands.
+
+---
+
+## Installation
+
+Place the `aioptcp` package inside your project directory or install it via:
+
+```bash
+pip install aioptcp
+```
+
+---
+
+## Quick Start Guide
+
+### 1. Running an APTCP Server
+
+The server listens for incoming TCP connections, handles APTCP handshakes, and provides active logical sessions to the application.
+
+```python
+import asyncio
+from aioptcp import PTCPServer, PTCPSocket
+
+async def handle_client(session: PTCPSocket):
+    session_hex = session.session_id.hex()
+    print(f"[Server] APTCP session {session_hex} successfully established.")
+    
+    try:
+        while True:
+            # Read data from the APTCP logical socket
+            data = await session.recv(1024)
+            if not data:
+                # Empty bytes indicate that the client initiated a graceful close (EOF)
+                print(f"[Server] Session {session_hex} closed gracefully by client.")
+                break
+                
+            print(f"[Server] Received from {session_hex}: {data.decode(errors='ignore')}")
+            
+            # Send echo response back into the session
+            await session.send(b"Echo: " + data)
+            
+    except Exception as e:
+        print(f"[Server] Error in session {session_hex}: {e}")
+    finally:
+        # Gracefully release socket resources
+        await session.close()
+
+async def main():
+    # Start the APTCP server on port 8888 with a session timeout of 30 seconds
+    server = PTCPServer(host='127.0.0.1', port=8888, timeout=30)
+    await server.start()
+    print("[Server] APTCP server started, waiting for connections...")
+    
+    while True:
+        # Accept a new logical APTCP connection
+        session = await server.accept()
+        asyncio.create_task(handle_client(session))
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### 2. Running an APTCP Client
+
+The client initiates the connection. In case of a network disruption, the library handles reconnection in the background without interrupting the application-level send/receive cycle.
+
+```python
+import asyncio
+from aioptcp import PTCPClient
+
+async def main():
+    # Create an APTCP client with a session keep-alive timeout of 30 seconds
+    client = PTCPClient(host='127.0.0.1', port=8888, timeout=30)
+    
+    try:
+        print("[Client] Connecting to APTCP server...")
+        await client.connect()
+        print(f"[Client] Logical connection established. Session ID: {client.session_id.hex()}")
+        
+        # Periodically send messages
+        for i in range(1, 6):
+            message = f"Message {i}".encode()
+            print(f"[Client] Sending: {message.decode()}")
+            
+            # If the network drops, send() will block rather than failing
+            await client.send(message)
+            
+            # Wait for response
+            response = await client.recv(1024)
+            print(f"[Client] Server response: {response.decode(errors='ignore')}")
+            
+            await asyncio.sleep(2)
+            
+    except Exception as e:
+        print(f"[Client] Critical error: {e}")
+    finally:
+        # Graceful logical socket closure (transmits a signed CLOSE frame)
+        print("[Client] Closing connection.")
+        await client.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
+
+## API Reference
+
+### `PTCPSocket` Class
+The base class representing a logical APTCP socket. Used directly by the client (inherited by `PTCPClient`) and returned by `PTCPServer.accept()`.
+
+*   **`state: PTCPState`**
+    The current state of the logical socket. Values (IntEnum):
+    *   `PTCPState.CONNECTING` (1) — Performing initial handshake.
+    *   `PTCPState.ESTABLISHED` (2) — Connection established, data transfer permitted.
+    *   `PTCPState.DISCONNECTED_WAITING` (3) — Physical link lost, waiting to resume.
+    *   `PTCPState.RESUMING` (4) — Executing session resumption over a new TCP channel.
+    *   `PTCPState.CLOSED` (5) — Connection permanently closed.
+*   **`session_id: bytes`**
+    A unique 16-byte identifier for the APTCP session. Set after a successful initial handshake.
+*   **`buffer_size_limit: int`**
+    The maximum size of the retransmission buffer (defaults to `5 * 1024 * 1024` bytes, or 5 MB).
+*   **`async send(data: bytes) -> bool`**
+    Asynchronously transmits data.
+    *   If the retransmission buffer is full (buffered bytes $\ge$ `buffer_size_limit`), the coroutine suspends execution (blocks) until an ACK is received from the peer.
+    *   If the socket is in the `DISCONNECTED_WAITING` or `RESUMING` state, data is buffered and the coroutine returns successfully.
+    *   Returns `True` if successfully buffered/sent. Returns `False` if the socket is permanently closed (`CLOSED`).
+*   **`async recv(size: int) -> bytes`**
+    Asynchronously reads data from the application receive buffer.
+    *   Blocks until data becomes available in the buffer.
+    *   Returns received data up to `size` bytes.
+    *   **Note:** Returns empty bytes (`b''`) when the remote peer gracefully closes the connection (EOF signal).
+*   **`async close(send_close_frame: bool = True)`**
+    Terminates the logical session and releases resources. If `send_close_frame` is `True`, it generates and transmits an authenticated `CLOSE` frame.
+
+### `PTCPClient(PTCPSocket)` Class
+The APTCP client class, inheriting the logical core of `PTCPSocket`.
+
+*   **`__init__(host: str, port: int, timeout: int = 30)`**
+    Creates a client instance. `timeout` determines how long (in seconds) the client will attempt to restore the logical session after a network disruption.
+*   **`async connect()`**
+    Initiates physical connection and performs key exchange (Diffie-Hellman handshake). Blocks until the state shifts to `ESTABLISHED`. Raises `TimeoutError` if a connection cannot be established within the timeout limit.
+
+### `PTCPServer` Class
+The server class, managing the lifecycle of APTCP sessions.
+
+*   **`__init__(host: str, port: int, timeout: int = 30)`**
+    Creates a server instance. `timeout` is the duration the server keeps a disconnected session alive before reclaiming memory.
+*   **`async start()`**
+    Binds the TCP listener to the specified host and port, and starts the background Garbage Collector to clean up abandoned sessions.
+*   **`async accept() -> PTCPSocket`**
+    Waits for a client to complete the handshake and returns a configured `PTCPSocket` in the `ESTABLISHED` state.
+*   **`sessions: dict`**
+    A dictionary containing active sessions, mapping `session_id` (16 bytes) to the respective `PTCPSocket` instance.
+
+---
+
+## AI Integration Guidelines
+
+When writing code that integrates `aioptcp`, follow these guidelines:
+
+1.  **Do not implement application-level reconnect logic.**
+    If the network connection drops, **do not** recreate the `PTCPClient` instance or call `connect()` again. The library transitions the socket to `DISCONNECTED_WAITING` and recovers the physical link in the background. Application-level calls to `send()` and `recv()` will block until resumption is complete.
+2.  **Detect connection teardown via empty read results.**
+    The only reliable way to detect that the remote peer closed the logical socket is checking if `await session.recv()` returns `b''`.
+3.  **Run server connections in concurrent tasks.**
+    `PTCPServer.accept()` should be called within an infinite loop, and each accepted session must be offloaded to a separate task using `asyncio.create_task()`.
+4.  **Manage resource cleanup.**
+    Always close sessions using `await session.close()` within a `finally` block to prevent file descriptor leaks.
+
+PyPI Link:
+https://pypi.org/project/aioptcp/
+
+---
 ---
 
 # aioptcp — Python-реализация протокола APTCP
@@ -18,7 +216,8 @@
 
 * **Прозрачность для прикладного кода:** При падении физического TCP-соединения логический сокет переходит в режим ожидания. Данные буферизируются на отправку, а вызовы методов `send()` и `recv()` блокируются, но не вызывают ошибок. После восстановления канала сессия APTCP автоматически возобновляется без потерь данных.
 * **Встроенный контроль переполнения (Backpressure):** Ограничение буфера переотправки предотвращает бесконтрольное потребление оперативной памяти. Метод `send()` автоматически приостанавливает выполнение корутины, если лимит буфера превышен.
-* **Безопасность возобновления сессий:** Возобновление сессии APTCP авторизуется с помощью подписи HMAC-SHA256 на базе ключа, сгенерированного в процессе первичного обмена по алгоритму Диффи-Хеллмана (2048-bit MODP Group).
+* **Безопасность возобновления сессий:** Возобновление сессии APTCP авторизуется с помощью трехэтапного взаимного Challenge-Response рукопожатия с подписью HMAC-SHA256 на базе ключа, сгенерированного в процессе первичного обмена по алгоритму Диффи-Хеллмана (2048-bit MODP Group). Это полностью исключает возможность replay-атак и MitM-перехвата сессий.
+* **Авторизованное закрытие сокета:** Команда `CLOSE` подписывается криптографической HMAC-SHA256 подписью, привязанной к сессии, что исключает возможность закрытия сокета злоумышленником через инъекцию пакетов.
 
 ---
 
@@ -115,7 +314,7 @@ async def main():
     except Exception as e:
         print(f"[Клиент] Критическая ошибка: {e}")
     finally:
-        # Штатное закрытие логического сокета и отправка кадра CLOSE
+        # Штатное закрытие логического сокета и отправка подписанного кадра CLOSE
         print("[Клиент] Закрытие соединения.")
         await client.close()
 
@@ -152,7 +351,7 @@ if __name__ == "__main__":
     *   Возвращает полученные данные длиной не более `size` байт.
     *   **Важно:** Возвращает пустую строку байт (`b''`), когда удаленная сторона штатно закрыла соединение (сигнал EOF).
 *   **`async close(send_close_frame: bool = True)`**
-    Завершает логическую сессию и освобождает системные ресурсы. Если `send_close_frame` равен `True`, отправляет удаленной стороне служебный кадр `CLOSE`.
+    Завершает логическую сессию и освобождает системные ресурсы. Если `send_close_frame` равен `True`, отправляет удаленной стороне служебный подписанный кадр `CLOSE`.
 
 ### Класс `PTCPClient(PTCPSocket)`
 Класс клиента протокола APTCP, наследующий логику `PTCPSocket`.
@@ -188,3 +387,6 @@ if __name__ == "__main__":
     Метод `PTCPServer.accept()` вызывается в бесконечном цикле, и каждую полученную сессию необходимо передавать в отдельную корутину с помощью `asyncio.create_task()`, чтобы сервер мог продолжать принимать новые соединения.
 4.  **Следите за закрытием ресурсов.**
     Всегда закрывайте сессию с помощью `await session.close()` в блоке `finally` обработчика соединений для предотвращения утечки дескрипторов файлов ОС.
+
+Ссылка на PyPI
+https://pypi.org/project/aioptcp/

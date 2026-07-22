@@ -34,9 +34,11 @@ class FrameType(IntEnum):
     HANDSHAKE_ACK = 2
     DATA = 3
     ACK = 4
-    RESUME = 5
+    RESUME_INIT = 5
     RESUME_ACK = 6
     CLOSE = 7
+    RESUME_CHALLENGE = 8
+    RESUME_RESPONSE = 9
 
 
 class PTCPSocket:
@@ -154,7 +156,13 @@ class PTCPSocket:
         if self.state != PTCPState.CLOSED:
             # Отправляем CLOSE по сети только если мы сами являемся инициатором закрытия
             if send_close_frame:
-                await self._send_frame(FrameType.CLOSE)
+                if self.session_key and self.session_id:
+                    nonce = secrets.token_bytes(8)
+                    signature = hmac.new(self.session_key, self.session_id + nonce + b'CLOSE', hashlib.sha256).digest()
+                    payload = nonce + self.session_id + signature
+                    await self._send_frame(FrameType.CLOSE, payload)
+                else:
+                    await self._send_frame(FrameType.CLOSE)
             self.state = PTCPState.CLOSED
             # Уведомляем сервер об окончательном закрытии сессии для очистки памяти
             if self.on_close:
@@ -245,9 +253,35 @@ class PTCPSocket:
                 self.drain_event.set()
 
 
+
         elif ftype == FrameType.CLOSE:
 
-            logging.info("Received CLOSE from peer.")
+            if self.session_key and self.session_id:
+
+                if len(payload) < 56:
+                    logging.warning("Received malformed CLOSE frame. Ignoring.")
+
+                    return
+
+                nonce = payload[:8]
+
+                recv_session_id = payload[8:24]
+
+                signature = payload[24:56]
+
+                if recv_session_id != self.session_id:
+                    logging.warning("CLOSE frame session mismatch. Ignoring.")
+
+                    return
+
+                expected_sig = hmac.new(self.session_key, self.session_id + nonce + b'CLOSE', hashlib.sha256).digest()
+
+                if not hmac.compare_digest(expected_sig, signature):
+                    logging.warning("CLOSE frame signature invalid. Ignoring.")
+
+                    return
+
+            logging.info("Received valid CLOSE from peer.")
 
             # Мы получатели CLOSE: закрываем ресурсы, но не шлем эхо-кадр обратно
 
@@ -325,17 +359,53 @@ class PTCPClient(PTCPSocket):
                         else:
                             raise ValueError(f"Unexpected frame type during handshake: {frame_data[0]}")
 
+
                     elif self.state in (PTCPState.DISCONNECTED_WAITING, PTCPState.RESUMING):
+
                         self.state = PTCPState.RESUMING
 
-                        nonce = secrets.token_bytes(8)
-                        signature = hmac.new(self.session_key, self.session_id + nonce, hashlib.sha256).digest()
-                        resume_payload = self.session_id + nonce + signature + struct.pack('!Q', self.recv_seq)
+                        client_nonce = secrets.token_bytes(8)
 
-                        await self._send_frame(FrameType.RESUME, resume_payload)
+                        init_signature = hmac.new(self.session_key, self.session_id + client_nonce,
+                                                  hashlib.sha256).digest()
+
+                        resume_init_payload = self.session_id + client_nonce + init_signature
+
+                        await self._send_frame(FrameType.RESUME_INIT, resume_init_payload)
 
                         length_bytes = await asyncio.wait_for(self.reader.readexactly(4), timeout=2.0)
+
                         length = struct.unpack('!I', length_bytes)[0]
+
+                        frame_data = await asyncio.wait_for(self.reader.readexactly(length), timeout=2.0)
+
+                        if frame_data[0] != FrameType.RESUME_CHALLENGE:
+                            raise ValueError(f"Expected RESUME_CHALLENGE, got {frame_data[0]}")
+
+                        if len(frame_data) < 41:
+                            raise ValueError("Malformed RESUME_CHALLENGE, too short")
+
+                        server_nonce = frame_data[1:9]
+
+                        server_signature = frame_data[9:41]
+
+                        expected_server_sig = hmac.new(self.session_key, self.session_id + server_nonce + client_nonce,
+                                                       hashlib.sha256).digest()
+
+                        if not hmac.compare_digest(expected_server_sig, server_signature):
+                            raise ValueError("Invalid RESUME_CHALLENGE signature")
+
+                        client_response_sig = hmac.new(self.session_key, self.session_id + client_nonce + server_nonce,
+                                                       hashlib.sha256).digest()
+
+                        resume_response_payload = client_response_sig + struct.pack('!Q', self.recv_seq)
+
+                        await self._send_frame(FrameType.RESUME_RESPONSE, resume_response_payload)
+
+                        length_bytes = await asyncio.wait_for(self.reader.readexactly(4), timeout=2.0)
+
+                        length = struct.unpack('!I', length_bytes)[0]
+
                         frame_data = await asyncio.wait_for(self.reader.readexactly(length), timeout=2.0)
 
                         if frame_data[0] == FrameType.RESUME_ACK:
@@ -483,21 +553,46 @@ class PTCPServer:
                 await self.app_connections.put(conn)
                 logging.info(f"New session generated: {session_id.hex()}")
 
-            elif ftype == FrameType.RESUME:
-                # Проверяем корректность границ полезной нагрузки для RESUME
-                if len(payload) < 64:
-                    raise ValueError(f"RESUME payload too short: {len(payload)}")
+
+            elif ftype == FrameType.RESUME_INIT:
+
+                # Проверяем корректность границ полезной нагрузки для RESUME_INIT
+
+                if len(payload) < 56:
+                    raise ValueError(f"RESUME_INIT payload too short: {len(payload)}")
 
                 session_id = payload[:16]
-                nonce = payload[16:24]
-                signature = payload[24:56]
-                client_recv_seq = struct.unpack('!Q', payload[56:64])[0]
+                client_nonce = payload[16:24]
+                init_signature = payload[24:56]
                 if session_id in self.sessions:
                     conn = self.sessions[session_id]
-                    expected_sig = hmac.new(conn.session_key, session_id + nonce, hashlib.sha256).digest()
+                    expected_init_sig = hmac.new(conn.session_key, session_id + client_nonce, hashlib.sha256).digest()
+                    if hmac.compare_digest(expected_init_sig, init_signature):
 
-                    if hmac.compare_digest(expected_sig, signature):
+                        server_nonce = secrets.token_bytes(8)
 
+                        challenge_sig = hmac.new(conn.session_key, session_id + server_nonce + client_nonce,
+                                                 hashlib.sha256).digest()
+
+                        challenge_frame = struct.pack('!IB', 1 + 8 + 32,
+                                                      FrameType.RESUME_CHALLENGE.value) + server_nonce + challenge_sig
+                        writer.write(challenge_frame)
+                        await writer.drain()
+                        length_bytes = await asyncio.wait_for(reader.readexactly(4), timeout=5.0)
+                        length = struct.unpack('!I', length_bytes)[0]
+                        frame_data = await asyncio.wait_for(reader.readexactly(length), timeout=5.0)
+
+                        if frame_data[0] != FrameType.RESUME_RESPONSE:
+                            raise ValueError(f"Expected RESUME_RESPONSE, got {frame_data[0]}")
+
+                        if len(frame_data) < 41:
+                            raise ValueError("RESUME_RESPONSE payload too short")
+                        client_response_sig = frame_data[1:33]
+                        client_recv_seq = struct.unpack('!Q', frame_data[33:41])[0]
+                        expected_response_sig = hmac.new(conn.session_key, session_id + client_nonce + server_nonce,
+                                                         hashlib.sha256).digest()
+                        if not hmac.compare_digest(expected_response_sig, client_response_sig):
+                            raise ValueError("Invalid RESUME_RESPONSE signature")
                         if conn.writer:
                             conn.writer.close()
                             try:
@@ -508,8 +603,8 @@ class PTCPServer:
                         conn.reader = reader
                         conn.writer = writer
                         conn.state = PTCPState.ESTABLISHED
-
                         # Сервер отправляет клиенту номер последнего принятого пакета
+
                         keys_to_delete = [k for k in conn.retrans_buffer.keys() if k <= client_recv_seq]
                         for k in keys_to_delete:
                             conn.current_retrans_size -= len(conn.retrans_buffer[k])
