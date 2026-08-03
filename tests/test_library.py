@@ -3,6 +3,10 @@ import socket
 import time
 import struct
 import pytest
+import ssl
+import os
+import tempfile
+import subprocess
 from aioptcp import PTCPServer, PTCPClient, PTCPState, FrameType, PTCPSocket
 
 """
@@ -494,8 +498,119 @@ async def test_parallel_sends_concurrency():
         for p in payloads:
             assert p in received_data
 
-        # Убеждаемся, что буфер переотправки клиента чист (все пакеты успешно подтверждены)
-        assert len(client.retrans_buffer) == 0
+            # Убеждаемся, что буфер переотправки клиента чист (все пакеты успешно подтверждены)
+            assert len(client.retrans_buffer) == 0
     finally:
         await client.close()
         await server_socket.close()
+
+
+@pytest.fixture(scope="module")
+def ssl_certs():
+    """Фикстура для генерации временного самоподписанного SSL-сертификата с помощью openssl"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        key_path = os.path.join(tmpdir, "key.pem")
+        cert_path = os.path.join(tmpdir, "cert.pem")
+
+        cmd = [
+            "openssl", "req", "-new", "-newkey", "rsa:2048", "-days", "1",
+            "-nodes", "-x509", "-keyout", key_path, "-out", cert_path,
+            "-subj", "/CN=127.0.0.1"
+        ]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        except Exception as e:
+            pytest.skip(f"Не удалось сгенерировать SSL-сертификат через openssl: {e}")
+
+        yield cert_path, key_path
+
+
+@pytest.mark.asyncio
+async def test_ssl_handshake_and_data_transfer(ssl_certs):
+    """Тест 12: Успешное SSL-рукопожатие, шифрование трафика и передача данных"""
+    cert_path, key_path = ssl_certs
+    port = get_free_port()
+
+    # Настройка SSL для сервера
+    server_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ssl.load_cert_chain(certfile=cert_path, keyfile=key_path)
+
+    # Настройка SSL для клиента (доверяем самоподписанному сертификату)
+    client_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    client_ssl.load_verify_locations(cafile=cert_path)
+    client_ssl.check_hostname = False  # Отключаем проверку имени хоста для loopback
+
+    server = PTCPServer('127.0.0.1', port, timeout=5, ssl=server_ssl)
+    await server.start()
+
+    client = PTCPClient('127.0.0.1', port, timeout=5, ssl=client_ssl)
+    await client.connect()
+    server_socket = await server.accept()
+
+    try:
+        # Проверяем, что соединение установлено и обернуто в SSL
+        assert client.state == PTCPState.ESTABLISHED
+        assert server_socket.state == PTCPState.ESTABLISHED
+
+        # Проверяем, что подлежащий сокет действительно использует SSL шифрование
+        assert client.writer.get_extra_info('sslcontext') is not None
+        assert server_socket.writer.get_extra_info('sslcontext') is not None
+
+        # Передаем данные по зашифрованному каналу
+        payload = b"encrypted secure data transfer"
+        await client.send(payload)
+
+        received_data = await asyncio.wait_for(server_socket.recv(len(payload)), timeout=2.0)
+        assert received_data == payload
+    finally:
+        await client.close()
+        await server_socket.close()
+
+
+@pytest.mark.asyncio
+async def test_ssl_mismatch_fails():
+    """Тест 13: Попытка подключения SSL-клиента к обычному TCP-серверу (должно завершиться ошибкой)"""
+    port = get_free_port()
+
+    # Запускаем обычный сервер без SSL
+    server = PTCPServer('127.0.0.1', port, timeout=5)
+    await server.start()
+
+    # Клиент пытается подключиться с SSL контекстом
+    client_ssl = ssl.create_default_context()
+    client_ssl.check_hostname = False
+    client_ssl.verify_mode = ssl.CERT_NONE
+
+    client = PTCPClient('127.0.0.1', port, timeout=3, ssl=client_ssl)
+
+    try:
+        with pytest.raises((ConnectionResetError, asyncio.TimeoutError, OSError, ValueError)):
+            await client.connect()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ssl_untrusted_cert_fails(ssl_certs):
+    """Тест 14: Проверка отклонения соединения при недоверенном сертификате сервера"""
+    cert_path, key_path = ssl_certs
+    port = get_free_port()
+
+    # Настройка SSL для сервера
+    server_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ssl.load_cert_chain(certfile=cert_path, keyfile=key_path)
+
+    # Настройка SSL для клиента со строгой проверкой, но без загрузки нашего CA
+    client_ssl = ssl.create_default_context()
+
+    server = PTCPServer('127.0.0.1', port, timeout=5, ssl=server_ssl)
+    await server.start()
+
+    client = PTCPClient('127.0.0.1', port, timeout=3, ssl=client_ssl)
+
+    try:
+        # Рукопожатие должно упасть из-за ошибки валидации сертификата (SSLError)
+        with pytest.raises((ssl.SSLError, asyncio.TimeoutError, ConnectionResetError)):
+            await client.connect()
+    finally:
+        await client.close()

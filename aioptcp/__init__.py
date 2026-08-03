@@ -5,6 +5,7 @@ import hmac
 import secrets
 import logging
 import time
+import ssl
 from enum import IntEnum
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - PTCP: %(message)s')
@@ -288,10 +289,11 @@ class PTCPSocket:
             await self.close(send_close_frame=False)
 
 class PTCPClient(PTCPSocket):
-    def __init__(self, host, port, timeout=30):
+    def __init__(self, host, port, timeout=30, ssl=None):
         super().__init__(timeout)
         self.host = host
         self.port = port
+        self.ssl = ssl
         self.dh_private = secrets.randbits(2048)
 
     async def connect(self):
@@ -326,7 +328,7 @@ class PTCPClient(PTCPSocket):
 
                 try:
                     self.reader, self.writer = await asyncio.wait_for(
-                        asyncio.open_connection(self.host, self.port), timeout=3.0
+                        asyncio.open_connection(self.host, self.port, ssl=self.ssl), timeout=3.0
                     )
 
                     if self.state == PTCPState.CONNECTING:
@@ -463,15 +465,16 @@ class PTCPClient(PTCPSocket):
 
 
 class PTCPServer:
-    def __init__(self, host, port, timeout=30):
+    def __init__(self, host, port, timeout=30, ssl=None):
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.ssl = ssl
         self.sessions = {}
         self.app_connections = asyncio.Queue()
 
     async def start(self):
-        server = await asyncio.start_server(self._handle_client, self.host, self.port)
+        server = await asyncio.start_server(self._handle_client, self.host, self.port, ssl=self.ssl)
         logging.info(f"PTCP Server listening on {self.host}:{self.port}")
         asyncio.create_task(server.serve_forever())
         # Запуск сборщика мусора для зависших сессий

@@ -388,5 +388,8 @@ if __name__ == "__main__":
 4.  **Следите за закрытием ресурсов.**
     Всегда закрывайте сессию с помощью `await session.close()` в блоке `finally` обработчика соединений для предотвращения утечки дескрипторов файлов ОС.
 
+
+The library natively supports secure data transmission over TLS. You can pass a configured ssl.SSLContext object to the ssl parameter when initializing PTCPClient or PTCPServer, exactly the same way as in standard asyncio methods (such as asyncio.open_connection and asyncio.start_server). If this parameter is omitted, the connection is established in plaintext.
+
 Ссылка на PyPI
 https://pypi.org/project/aioptcp/

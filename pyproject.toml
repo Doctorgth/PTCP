@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aioptcp"
-version = "1.0.1"
+version = "1.0.2"
 description = "Persistent TCP (PTCP) session-layer protocol implementation over asyncio"
 readme = "README.md"
 requires-python = ">=3.8"
