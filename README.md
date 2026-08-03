@@ -193,6 +193,9 @@ When writing code that integrates `aioptcp`, follow these guidelines:
 4.  **Manage resource cleanup.**
     Always close sessions using `await session.close()` within a `finally` block to prevent file descriptor leaks.
 
+The library natively supports secure data transmission over TLS. You can pass a configured ssl.SSLContext object to the ssl parameter when initializing PTCPClient or PTCPServer, exactly the same way as in standard asyncio methods (such as asyncio.open_connection and asyncio.start_server). If this parameter is omitted, the connection is established in plaintext.
+
+
 PyPI Link:
 https://pypi.org/project/aioptcp/
 
@@ -388,8 +391,8 @@ if __name__ == "__main__":
 4.  **Следите за закрытием ресурсов.**
     Всегда закрывайте сессию с помощью `await session.close()` в блоке `finally` обработчика соединений для предотвращения утечки дескрипторов файлов ОС.
 
+Библиотека нативно поддерживает безопасную передачу данных по протоколу TLS. Вы можете передать настроенный объект ssl.SSLContext в параметр ssl при создании PTCPClient и PTCPServer точно так же, как это делается в стандартных методах asyncio (например, asyncio.open_connection и asyncio.start_server). Если параметр не задан, соединение устанавливается в открытом виде.
 
-The library natively supports secure data transmission over TLS. You can pass a configured ssl.SSLContext object to the ssl parameter when initializing PTCPClient or PTCPServer, exactly the same way as in standard asyncio methods (such as asyncio.open_connection and asyncio.start_server). If this parameter is omitted, the connection is established in plaintext.
 
 Ссылка на PyPI
 https://pypi.org/project/aioptcp/
